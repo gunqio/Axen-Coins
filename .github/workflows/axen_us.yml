@@ -3,23 +3,18 @@ name: Axen-US
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   run_axen_us:
     runs-on: ubuntu-latest
-
     steps:
       - name: 📥 下载私库脚本
         uses: actions/checkout@v4
         with:
-          repository: gunqio/zhiyong
+          repository: gunqio/zhiyong          # 修改此处
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
-          persist-credentials: false
 
-      - name: 📥 下载状态文件
+      - name: 📂 下载状态文件
         uses: actions/checkout@v4
         with:
           repository: gunqio/zhiyong
@@ -65,7 +60,7 @@ jobs:
           python-version: '3.10'
 
       - name: 🛡️ 启动 GOST 代理转发
-        if: ${{ secrets.US_PROXY != '' }}
+        if: ${{ env.GOST_PROXY != '' }}
         env:
           GOST_PROXY: ${{ secrets.US_PROXY }}
         run: |
