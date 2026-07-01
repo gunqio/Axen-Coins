@@ -14,45 +14,8 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
 
-      - name: 📂 下载状态文件
-        uses: actions/checkout@v4
-        with:
-          repository: gunqio/zhiyong
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: state_repo
-          persist-credentials: false
-
       - name: 📂 移动脚本到工作目录
         run: mv private/axen_coins.py axen_coins.py
-
-      - name: 📂 拷贝 last_run.txt 到工作目录
-        run: |
-          if [ -f state_repo/last_run.txt ]; then
-            cp state_repo/last_run.txt ./last_run.txt
-          else
-            echo "last_run.txt 不存在，创建空文件"
-            touch ./last_run.txt
-          fi
-          echo "当前工作目录："
-          pwd
-          echo "last_run.txt 内容："
-          cat ./last_run.txt || true
-
-      - name: 🕒 初始化 last_run.txt
-        shell: bash
-        run: |
-          if [ ! -f last_run.txt ]; then
-            echo "last_run.txt 不存在，创建并写入当前时间"
-            date -u +"%Y-%m-%dT%H:%M:%S" > last_run.txt
-          elif [ ! -s last_run.txt ]; then
-            echo "last_run.txt 为空，写入当前时间"
-            date -u +"%Y-%m-%dT%H:%M:%S" > last_run.txt
-          else
-            echo "last_run.txt 已有内容，保持不变"
-            cat last_run.txt
-          fi
-          echo "---- last_run.txt ----"
-          cat last_run.txt
 
       - name: 🐍 设置 Python
         uses: actions/setup-python@v4
@@ -98,20 +61,6 @@ jobs:
           CRON_JOB: ${{ secrets.US_CRON }}
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
-
-      - name: 📂 回写 last_run.txt
-        run: |
-          cp ./last_run.txt state_repo/last_run.txt
-          cd state_repo
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add last_run.txt
-          if git diff --cached --quiet; then
-            echo "没有变化，不提交"
-          else
-            git commit -m "chore: update last_run.txt"
-            git push https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/gunqio/zhiyong.git HEAD:main
-          fi
 
       - name: 📸 上传截图
         if: always()
