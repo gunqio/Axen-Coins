@@ -10,7 +10,7 @@ jobs:
       - name: 📥 下载私库脚本
         uses: actions/checkout@v4
         with:
-          repository: gunqio/zhiyong          # 修改此处
+          repository: gunqio/zhiyong
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
 
@@ -18,15 +18,18 @@ jobs:
         run: mv private/axen_coins.py axen_coins.py
 
       - name: 🐍 设置 Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: 🛡️ 启动 GOST 代理转发
-        if: ${{ env.GOST_PROXY != '' }}
         env:
           GOST_PROXY: ${{ secrets.US_PROXY }}
         run: |
+          if [ -z "$GOST_PROXY" ]; then
+            echo "ℹ️ 未设置代理，跳过 GOST"
+            exit 0
+          fi
           VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
           echo "📦 GOST 版本: $VERSION"
           wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
@@ -35,28 +38,23 @@ jobs:
           nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
           sleep 3
           echo "✅ GOST 已启动，测试连通性..."
-          curl -s -x http://127.0.0.1:8080 https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g'
+          curl -s -x http://127.0.0.1:8080 https://api.ipify.org
 
       - name: 🛠️ 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            google-chrome-stable \
-            xvfb \
-            x11-utils \
-            xdotool \
-            scrot
+          sudo apt-get install -y google-chrome-stable xvfb x11-utils xdotool scrot
 
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install seleniumbase
+          python -m pip install --upgrade pip
+          pip install seleniumbase requests
           seleniumbase install chromedriver
 
       - name: 🚀 运行脚本
         env:
           PYTHONIOENCODING: utf-8
           AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
-          GOST_PROXY: ${{ secrets.US_PROXY }}
           TG_BOT: ${{ secrets.TG_BOT }}
           CRON_JOB: ${{ secrets.US_CRON }}
         run: |
