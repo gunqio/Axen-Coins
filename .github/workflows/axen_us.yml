@@ -28,8 +28,8 @@ jobs:
       - name: 🛡️ 启动 Xray 代理（自适应 VLESS/VMess）
         env:
           VLESS_CONFIG: ${{ secrets.VLESS_CONFIG }}
-        # 优化 1：使用标准的 secrets 上下文进行非空判断
-        if: ${{ secrets.VLESS_CONFIG != '' }}
+        # 修复关键点：在 if 中使用 env.VLESS_CONFIG，不要直接用 secrets
+        if: ${{ env.VLESS_CONFIG != '' }}
         run: |
           echo "📦 下载 Xray-core..."
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
@@ -37,11 +37,11 @@ jobs:
           chmod +x xray
 
           echo "📝 写入内核配置文件..."
-          # 优化 2：使用 printf 确保多行 JSON 字符串能原样写入，防止特殊字符或换行符被 echo 破坏
+          # 使用 printf 确保多行 JSON 字符串能原样写入，防止特殊字符或换行符被 echo 破坏
           printf "%s" "$VLESS_CONFIG" > config.json
 
           echo "🚀 启动 Xray 核心守护进程（监听 127.0.0.1:1080）..."
-          # 优化 3：重定向标准输入 </dev/null 并配合 disown，防止 GitHub Actions 追踪进程导致挂起卡死
+          # 重定向标准输入 </dev/null 并配合 disown，彻底防止 GitHub Actions 追踪进程导致挂起卡死
           nohup ./xray -c config.json > xray.log 2>&1 </dev/null &
           disown
           
@@ -100,7 +100,7 @@ jobs:
             *.png
             screens/*.png
 
-      # === 新增步骤：任务结束后通知 Cloudflare Worker 定时 70 分钟 ===
+      # === 任务结束后通知 Cloudflare Worker 定时 70 分钟 ===
       - name: 🔔 通知
         if: always()
         env:
