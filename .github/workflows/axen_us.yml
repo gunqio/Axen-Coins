@@ -51,7 +51,7 @@ jobs:
           sudo mkdir -p /usr/local/etc/xray
           sudo mv xray/xray /usr/local/bin/xray
           
-          # 下载 GeoIP/GeoSite 数据库（routing 规则需要）
+          # 下载 GeoIP/GeoSite 数据库
           echo "🌍 下载 GeoIP/GeoSite..."
           sudo wget -q "https://github.com/v2fly/geoip/raw/release/geoip.dat" -O /usr/local/bin/geoip.dat
           sudo wget -q "https://github.com/v2fly/domain-list-community/raw/release/dlc.dat" -O /usr/local/bin/geosite.dat
@@ -284,10 +284,13 @@ jobs:
       - name: 🚀 运行脚本
         env:
           PYTHONIOENCODING: utf-8
-          ALL_PROXY: ${{ env.XRAY_SUBSCRIPTION != '' && 'socks5://127.0.0.1:10808' || '' }}
-          HTTP_PROXY: ${{ env.XRAY_SUBSCRIPTION != '' && 'http://127.0.0.1:8080' || '' }}
-          HTTPS_PROXY: ${{ env.XRAY_SUBSCRIPTION != '' && 'http://127.0.0.1:8080' || '' }}
+          # ✅ 修复：同时检查 SUBSCRIPTION 和 NODE_JSON
+          ALL_PROXY: ${{ (env.XRAY_SUBSCRIPTION != '' || env.XRAY_NODE_JSON != '') && 'socks5://127.0.0.1:10808' || '' }}
+          HTTP_PROXY: ${{ (env.XRAY_SUBSCRIPTION != '' || env.XRAY_NODE_JSON != '') && 'http://127.0.0.1:8080' || '' }}
+          HTTPS_PROXY: ${{ (env.XRAY_SUBSCRIPTION != '' || env.XRAY_NODE_JSON != '') && 'http://127.0.0.1:8080' || '' }}
         run: |
+          echo "ALL_PROXY=$ALL_PROXY"
+          echo "HTTP_PROXY=$HTTP_PROXY"
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
 
       - name: 📸 上传截图
