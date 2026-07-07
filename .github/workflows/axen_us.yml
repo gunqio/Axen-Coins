@@ -43,7 +43,6 @@ jobs:
         if: ${{ env.XRAY_SUBSCRIPTION != '' || env.XRAY_NODE_JSON != '' }}
         run: |
           echo "📦 下载 Xray-core..."
-          # 直接下载 release，不用安装脚本
           VERSION=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
           echo "Xray 版本: $VERSION"
           wget -q "https://github.com/XTLS/Xray-core/releases/download/${VERSION}/Xray-linux-64.zip" -O xray.zip
@@ -52,12 +51,17 @@ jobs:
           sudo mkdir -p /usr/local/etc/xray
           sudo mv xray/xray /usr/local/bin/xray
           
+          # 下载 GeoIP/GeoSite 数据库（routing 规则需要）
+          echo "🌍 下载 GeoIP/GeoSite..."
+          sudo wget -q "https://github.com/v2fly/geoip/raw/release/geoip.dat" -O /usr/local/bin/geoip.dat
+          sudo wget -q "https://github.com/v2fly/domain-list-community/raw/release/dlc.dat" -O /usr/local/bin/geosite.dat
+          
           if [ -n "$XRAY_SUBSCRIPTION" ]; then
             echo "🔗 使用订阅链接解析节点..."
             pip install requests 2>/dev/null || true
             
             python3 << 'PYEOF'
-          import os, base64, json, urllib.request, urllib.parse
+          import os, base64, json, urllib.request
 
           sub_url = os.getenv('XRAY_SUBSCRIPTION', '')
           if not sub_url:
@@ -223,7 +227,10 @@ jobs:
                   {"tag": "block", "protocol": "blackhole"}
               ],
               "routing": {
-                  "rules": [{"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"}]
+                  "domainStrategy": "IPIfNonMatch",
+                  "rules": [
+                      {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"}
+                  ]
               }
           }
 
