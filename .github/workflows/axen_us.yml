@@ -2,29 +2,18 @@ name: Axen-US
 
 on:
   workflow_dispatch:
+  # 增加支持外部 API 触发通道
   repository_dispatch:
     types: [axen_auto_task]
-  schedule:
-    - cron: '0 */6 * * *'
 
 jobs:
   run_axen_us:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    env:
-      AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
-      XRAY_SUBSCRIPTION: ${{ secrets.XRAY_SUBSCRIPTION }}
-      XRAY_NODE_JSON: ${{ secrets.XRAY_NODE_JSON }}
-      TG_BOT: ${{ secrets.TG_BOT }}
-      CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-      CF_WORKER_AUTH_TOKEN: ${{ secrets.CF_WORKER_AUTH_TOKEN }}
-
     steps:
       - name: 📥 下载私库脚本
         uses: actions/checkout@v4
         with:
-          repository: gunqio/zhiyong
+          repository: gunqio/zhiyong          # 修改此处
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
 
@@ -36,267 +25,44 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ============================================
-      # Xray 代理转发（自适应 VLESS/VMess/SS/Trojan）
-      # ============================================
-      - name: 🛡️ 启动 Xray 代理转发
-        if: ${{ env.XRAY_SUBSCRIPTION != '' || env.XRAY_NODE_JSON != '' }}
+      - name: 🛡️ 启动 GOST 代理转发
+        if: ${{ env.GOST_PROXY != '' }}
+        env:
+          GOST_PROXY: ${{ secrets.US_PROXY }}
         run: |
-          echo "📦 下载 Xray-core..."
-          VERSION=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-          echo "Xray 版本: $VERSION"
-          wget -q "https://github.com/XTLS/Xray-core/releases/download/${VERSION}/Xray-linux-64.zip" -O xray.zip
-          unzip -q xray.zip -d xray
-          chmod +x xray/xray
-          sudo mkdir -p /usr/local/etc/xray
-          sudo mv xray/xray /usr/local/bin/xray
-          
-          # 下载 GeoIP/GeoSite 数据库
-          echo "🌍 下载 GeoIP/GeoSite..."
-          sudo wget -q "https://github.com/v2fly/geoip/raw/release/geoip.dat" -O /usr/local/bin/geoip.dat
-          sudo wget -q "https://github.com/v2fly/domain-list-community/raw/release/dlc.dat" -O /usr/local/bin/geosite.dat
-          
-          if [ -n "$XRAY_SUBSCRIPTION" ]; then
-            echo "🔗 使用订阅链接解析节点..."
-            pip install requests 2>/dev/null || true
-            
-            python3 << 'PYEOF'
-          import os, base64, json, urllib.request
-
-          sub_url = os.getenv('XRAY_SUBSCRIPTION', '')
-          if not sub_url:
-              exit(1)
-
-          req = urllib.request.Request(sub_url, headers={'User-Agent': 'v2rayN/6.0'})
-          with urllib.request.urlopen(req, timeout=15) as resp:
-              data = resp.read()
-
-          try:
-              decoded = base64.b64decode(data + b'=' * (-len(data) % 4)).decode('utf-8', errors='ignore')
-              links = [l.strip() for l in decoded.strip().split('\n') if l.strip()]
-          except:
-              links = [l.strip() for l in data.decode('utf-8', errors='ignore').strip().split('\n') if l.strip()]
-
-          if not links:
-              print("❌ 订阅解析失败")
-              exit(1)
-
-          node_link = links[0]
-          print(f"🎯 使用节点: {node_link[:80]}...")
-
-          config = None
-          if node_link.startswith('vmess://'):
-              b64 = node_link[8:]
-              b64 += '=' * (-len(b64) % 4)
-              node = json.loads(base64.b64decode(b64).decode('utf-8'))
-              config = {
-                  "protocol": "vmess",
-                  "settings": {
-                      "vnext": [{
-                          "address": node.get('add', ''),
-                          "port": int(node.get('port', 443)),
-                          "users": [{
-                              "id": node.get('id', ''),
-                              "alterId": int(node.get('aid', 0)),
-                              "security": node.get('scy', 'auto')
-                          }]
-                      }]
-                  },
-                  "streamSettings": {
-                      "network": node.get('net', 'tcp'),
-                      "security": node.get('tls', ''),
-                      "tlsSettings": {
-                          "serverName": node.get('sni', node.get('host', node.get('add', ''))),
-                          "allowInsecure": True
-                      } if node.get('tls') else None,
-                      "wsSettings": {
-                          "path": node.get('path', '/'),
-                          "headers": {"Host": node.get('host', node.get('add', ''))}
-                      } if node.get('net') == 'ws' else None
-                  }
-              }
-              
-          elif node_link.startswith('vless://'):
-              from urllib.parse import urlparse, parse_qs, unquote
-              parsed = urlparse(node_link)
-              uuid = parsed.username
-              address = parsed.hostname
-              port = parsed.port or 443
-              params = parse_qs(parsed.query)
-              
-              security = params.get('security', [''])[0]
-              network = params.get('type', ['tcp'])[0]
-              sni = params.get('sni', [''])[0] or address
-              path = unquote(params.get('path', ['/'])[0])
-              host = params.get('host', [address])[0]
-              
-              config = {
-                  "protocol": "vless",
-                  "settings": {
-                      "vnext": [{
-                          "address": address,
-                          "port": port,
-                          "users": [{
-                              "id": uuid,
-                              "encryption": "none",
-                              "flow": params.get('flow', [''])[0] or ""
-                          }]
-                      }]
-                  },
-                  "streamSettings": {
-                      "network": network,
-                      "security": security,
-                      "tlsSettings": {
-                          "serverName": sni,
-                          "allowInsecure": True
-                      } if security in ['tls', 'xtls', 'reality'] else None,
-                      "wsSettings": {
-                          "path": path,
-                          "headers": {"Host": host}
-                      } if network == 'ws' else None,
-                      "grpcSettings": {
-                          "serviceName": params.get('serviceName', [''])[0]
-                      } if network == 'grpc' else None
-                  }
-              }
-              
-          elif node_link.startswith('ss://'):
-              from urllib.parse import urlparse
-              parsed = urlparse(node_link)
-              b64_auth = parsed.username
-              if b64_auth:
-                  b64_auth += '=' * (-len(b64_auth) % 4)
-                  auth = base64.b64decode(b64_auth).decode('utf-8')
-                  method, password = auth.split(':', 1)
-              else:
-                  method, password = 'aes-256-gcm', ''
-              
-              config = {
-                  "protocol": "shadowsocks",
-                  "settings": {
-                      "servers": [{
-                          "address": parsed.hostname,
-                          "port": parsed.port or 8388,
-                          "method": method,
-                          "password": password
-                      }]
-                  }
-              }
-              
-          elif node_link.startswith('trojan://'):
-              from urllib.parse import urlparse, parse_qs
-              parsed = urlparse(node_link)
-              password = parsed.username
-              address = parsed.hostname
-              port = parsed.port or 443
-              params = parse_qs(parsed.query)
-              sni = params.get('sni', [''])[0] or address
-              
-              config = {
-                  "protocol": "trojan",
-                  "settings": {
-                      "servers": [{
-                          "address": address,
-                          "port": port,
-                          "password": password
-                      }]
-                  },
-                  "streamSettings": {
-                      "network": params.get('type', ['tcp'])[0],
-                      "security": "tls",
-                      "tlsSettings": {
-                          "serverName": sni,
-                          "allowInsecure": True
-                      }
-                  }
-              }
-
-          if not config:
-              print("❌ 不支持的协议")
-              exit(1)
-
-          xray_config = {
-              "log": {"loglevel": "warning"},
-              "inbounds": [
-                  {"port": 10808, "protocol": "socks", "settings": {"auth": "noauth", "udp": True}, "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
-                  {"port": 8080, "protocol": "http", "settings": {"allowTransparent": False}}
-              ],
-              "outbounds": [
-                  {"tag": "proxy", **config},
-                  {"tag": "direct", "protocol": "freedom"},
-                  {"tag": "block", "protocol": "blackhole"}
-              ],
-              "routing": {
-                  "domainStrategy": "IPIfNonMatch",
-                  "rules": [
-                      {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"}
-                  ]
-              }
-          }
-
-          def clean_none(d):
-              if isinstance(d, dict):
-                  return {k: clean_none(v) for k, v in d.items() if v is not None}
-              elif isinstance(d, list):
-                  return [clean_none(i) for i in d if i is not None]
-              return d
-
-          xray_config = clean_none(xray_config)
-
-          with open('/usr/local/etc/xray/config.json', 'w') as f:
-              json.dump(xray_config, f, indent=2)
-
-          print(f"✅ 配置已生成: {config['protocol']} -> {address}")
-          PYEOF
-          
-          else
-            echo "📝 使用手动节点配置..."
-            echo "$XRAY_NODE_JSON" | sudo tee /usr/local/etc/xray/config.json > /dev/null
-          fi
-          
-          echo "🔍 验证配置..."
-          sudo xray -test -config /usr/local/etc/xray/config.json
-          
-          echo "🚀 启动 Xray..."
-          sudo nohup xray -config /usr/local/etc/xray/config.json > xray.log 2>&1 &
+          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+          echo "📦 GOST 版本: $VERSION"
+          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
+          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
+          chmod +x gost
+          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
           sleep 3
-          
-          echo "✅ Xray 已启动，测试连通性..."
-          curl -s --connect-timeout 10 --socks5 127.0.0.1:10808 https://api.ipify.org 2>/dev/null | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' || echo "SOCKS5 测试失败"
-          curl -s --connect-timeout 10 -x http://127.0.0.1:8080 https://api.ipify.org 2>/dev/null | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' || echo "HTTP 代理测试失败"
+          echo "✅ GOST 已启动，测试连通性..."
+          curl -s -x http://127.0.0.1:8080 https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g'
 
       - name: 🛠️ 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y \
             google-chrome-stable \
             xvfb \
             x11-utils \
             xdotool \
-            scrot \
-            unzip \
-            libnss3 \
-            libgconf-2-4 \
-            libfontconfig1
+            scrot
 
       - name: 🐍 安装 Python 依赖
         run: |
           pip install seleniumbase
-          # 强制安装最新版 ChromeDriver
-          seleniumbase install chromedriver latest
-          # 验证版本
-          chromedriver --version
-          google-chrome --version
+          seleniumbase install chromedriver
 
       - name: 🚀 运行脚本
         env:
           PYTHONIOENCODING: utf-8
-          ALL_PROXY: ${{ (env.XRAY_SUBSCRIPTION != '' || env.XRAY_NODE_JSON != '') && 'socks5://127.0.0.1:10808' || '' }}
-          HTTP_PROXY: ${{ (env.XRAY_SUBSCRIPTION != '' || env.XRAY_NODE_JSON != '') && 'http://127.0.0.1:8080' || '' }}
-          HTTPS_PROXY: ${{ (env.XRAY_SUBSCRIPTION != '' || env.XRAY_NODE_JSON != '') && 'http://127.0.0.1:8080' || '' }}
+          AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
+          GOST_PROXY: ${{ secrets.US_PROXY }}
+          TG_BOT: ${{ secrets.TG_BOT }}
+          CRON_JOB: ${{ secrets.US_CRON }}
         run: |
-          echo "ALL_PROXY=$ALL_PROXY"
-          echo "HTTP_PROXY=$HTTP_PROXY"
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
 
       - name: 📸 上传截图
@@ -306,17 +72,14 @@ jobs:
           name: debug-screenshots
           path: "*.png"
 
-      - name: 📄 上传 Xray 日志
+      # === 新增步骤：任务结束后通知 Cloudflare Worker 定时 70 分钟 ===
+      - name: 🔔 通知 
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xray-logs
-          path: "xray.log"
-
-      - name: 🔔 通知 Cloudflare Worker
-        if: always()
+        env:
+          WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+          WORKER_AUTH_TOKEN: ${{ secrets.CF_WORKER_AUTH_TOKEN }}
         run: |
-          curl -X POST "$CF_WORKER_URL" \
-            -H "Authorization: Bearer $CF_WORKER_AUTH_TOKEN" \
+          curl -X POST "$WORKER_URL" \
+            -H "Authorization: Bearer $WORKER_AUTH_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"status": "completed"}'
