@@ -2,31 +2,18 @@ name: Axen-US
 
 on:
   workflow_dispatch:
+  # 增加支持外部 API 触发通道
   repository_dispatch:
     types: [axen_auto_task]
-  schedule:
-    - cron: '0 */6 * * *'
 
 jobs:
   run_axen_us:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    env:
-      AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
-      XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}          # 分享链接或完整 JSON (可 base64)
-      TG_BOT: ${{ secrets.TG_BOT }}
-      CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-      CF_WORKER_AUTH_TOKEN: ${{ secrets.CF_WORKER_AUTH_TOKEN }}
-      # 以下已废弃，保留不影响
-      XRAY_SUBSCRIPTION: ${{ secrets.XRAY_SUBSCRIPTION }}
-      XRAY_NODE_JSON: ${{ secrets.XRAY_NODE_JSON }}
-
     steps:
       - name: 📥 下载私库脚本
         uses: actions/checkout@v4
         with:
-          repository: gunqio/zhiyong
+          repository: gunqio/zhiyong          # 修改此处
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
 
@@ -38,262 +25,46 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ============================================
-      # Xray 代理转发（自适应 VLESS/VMess/SS/Trojan）
-      # ============================================
-      - name: 🛡️ 启动 Xray 代理（自适应协议）
+      # ========== 新增：Xray 代理（支持 vless/vmess/ss）==========
+      - name: 🔄 配置 Xray 代理（vless/vmess/ss）
+        if: ${{ secrets.PROXY_CONFIG_BASE64 != '' }}
         env:
-          XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}
+          PROXY_CONFIG_BASE64: ${{ secrets.PROXY_CONFIG_BASE64 }}
         run: |
-          set -e
-
-          if [ -z "$XRAY_CONFIG" ]; then
-            echo "ℹ️ XRAY_CONFIG 未配置，跳过代理启动，使用直连"
-            exit 0
-          fi
-
-          echo "📦 正在下载 Xray-core..."
-          VERSION=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          curl -L --retry 3 --fail -o Xray-linux-64.zip "https://github.com/XTLS/Xray-core/releases/download/v${VERSION}/Xray-linux-64.zip"
-          unzip -q Xray-linux-64.zip xray
+          # 1. 下载最新 Xray-core
+          echo "📦 下载 Xray-core..."
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q Xray-linux-64.zip
           chmod +x xray
-          echo "✅ Xray 下载完成 (v${VERSION})"
 
-          echo "🔧 生成 Xray 配置..."
-          python3 << 'PYEOF'
-          import os, json, base64, urllib.parse
+          # 2. 解码配置文件（需要您事先将 config.json 进行 Base64 编码后存入 secret）
+          echo "$PROXY_CONFIG_BASE64" | base64 -d > config.json
+          echo "✅ 配置文件已生成"
 
-          xray_config = os.environ.get("XRAY_CONFIG", "").strip()
-          if not xray_config:
-              print("⚠️ XRAY_CONFIG 为空，跳过")
-              exit(0)
+          # 3. 启动 Xray（后台运行）
+          nohup ./xray -c config.json > xray.log 2>&1 &
+          sleep 3
 
-          outbound = None
+          # 4. 导出系统代理环境变量（假设您配置的 inbound 端口为：http=10809, socks=1080）
+          echo "HTTP_PROXY=http://127.0.0.1:10809" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=http://127.0.0.1:10809" >> $GITHUB_ENV
+          echo "ALL_PROXY=socks5://127.0.0.1:1080" >> $GITHUB_ENV
+          echo "NO_PROXY=localhost,127.0.0.1" >> $GITHUB_ENV
 
-          # ---------- 解析 VLESS ----------
-          if xray_config.startswith("vless://"):
-              u = urllib.parse.urlparse(xray_config)
-              q = urllib.parse.parse_qs(u.query)
-              outbound = {
-                  "protocol": "vless",
-                  "settings": {
-                      "vnext": [{
-                          "address": u.hostname,
-                          "port": int(u.port or 443),
-                          "users": [{
-                              "id": u.username,
-                              "encryption": q.get("encryption", ["none"])[0],
-                              "flow": q.get("flow", [""])[0] or None
-                          }]
-                      }]
-                  },
-                  "streamSettings": {
-                      "network": q.get("type", ["tcp"])[0],
-                      "security": q.get("security", ["none"])[0],
-                  }
-              }
-              if not outbound["settings"]["vnext"][0]["users"][0]["flow"]:
-                  del outbound["settings"]["vnext"][0]["users"][0]["flow"]
-
-              sec = q.get("security", ["none"])[0]
-              if sec in ["tls", "xtls", "reality"]:
-                  tls_base = {
-                      "serverName": q.get("sni", [u.hostname])[0],
-                      "fingerprint": q.get("fp", ["chrome"])[0]
-                  }
-                  if sec == "xtls":
-                      outbound["streamSettings"]["xtlsSettings"] = tls_base
-                  elif sec == "reality":
-                      tls_base.update({
-                          "publicKey": q.get("pbk", [""])[0],
-                          "shortId": q.get("sid", [""])[0],
-                          "spiderX": q.get("spx", [""])[0]
-                      })
-                      outbound["streamSettings"]["realitySettings"] = tls_base
-                  else:
-                      outbound["streamSettings"]["tlsSettings"] = tls_base
-
-              net = q.get("type", ["tcp"])[0]
-              if net == "ws":
-                  outbound["streamSettings"]["wsSettings"] = {
-                      "path": urllib.parse.unquote(q.get("path", ["/"])[0]),
-                      "headers": {"Host": q.get("host", [u.hostname])[0]}
-                  }
-              elif net == "grpc":
-                  outbound["streamSettings"]["grpcSettings"] = {
-                      "serviceName": q.get("serviceName", [""])[0]
-                  }
-              elif net == "tcp" and q.get("headerType", [""])[0] == "http":
-                  outbound["streamSettings"]["tcpSettings"] = {
-                      "header": {
-                          "type": "http",
-                          "request": {
-                              "path": q.get("path", ["/"])[0],
-                              "headers": {"Host": [q.get("host", [u.hostname])[0]]}
-                          }
-                      }
-                  }
-
-          # ---------- 解析 VMess ----------
-          elif xray_config.startswith("vmess://"):
-              b64 = xray_config.replace("vmess://", "")
-              pad = 4 - len(b64) % 4
-              cfg = json.loads(base64.urlsafe_b64decode(b64 + ("=" * pad)).decode("utf-8"))
-              outbound = {
-                  "protocol": "vmess",
-                  "settings": {
-                      "vnext": [{
-                          "address": cfg["add"],
-                          "port": int(cfg["port"]),
-                          "users": [{
-                              "id": cfg["id"],
-                              "alterId": int(cfg.get("aid", 0)),
-                              "security": cfg.get("scy", "auto")
-                          }]
-                      }]
-                  },
-                  "streamSettings": {
-                      "network": cfg.get("net", "tcp"),
-                      "security": "tls" if cfg.get("tls") == "tls" else "none"
-                  }
-              }
-              if cfg.get("tls") == "tls":
-                  outbound["streamSettings"]["tlsSettings"] = {
-                      "serverName": cfg.get("sni", cfg["add"]),
-                      "fingerprint": cfg.get("fp", "chrome")
-                  }
-              if cfg.get("net") == "ws":
-                  outbound["streamSettings"]["wsSettings"] = {
-                      "path": cfg.get("path", "/"),
-                      "headers": {"Host": cfg.get("host", cfg["add"])}
-                  }
-              elif cfg.get("net") == "grpc":
-                  outbound["streamSettings"]["grpcSettings"] = {"serviceName": cfg.get("path", "")}
-              elif cfg.get("net") == "tcp" and cfg.get("type") == "http":
-                  outbound["streamSettings"]["tcpSettings"] = {
-                      "header": {"type": "http", "request": {"path": cfg.get("path", "/"), "headers": {"Host": [cfg.get("host", cfg["add"])]}}}
-                  }
-
-          # ---------- 解析 Shadowsocks ----------
-          elif xray_config.startswith("ss://"):
-              from urllib.parse import urlparse
-              parsed = urlparse(xray_config)
-              b64_auth = parsed.username
-              if b64_auth:
-                  b64_auth += '=' * (-len(b64_auth) % 4)
-                  auth = base64.b64decode(b64_auth).decode('utf-8')
-                  method, password = auth.split(':', 1)
-              else:
-                  method, password = 'aes-256-gcm', ''
-              outbound = {
-                  "protocol": "shadowsocks",
-                  "settings": {
-                      "servers": [{
-                          "address": parsed.hostname,
-                          "port": parsed.port or 8388,
-                          "method": method,
-                          "password": password
-                      }]
-                  }
-              }
-
-          # ---------- 解析 Trojan ----------
-          elif xray_config.startswith("trojan://"):
-              from urllib.parse import urlparse, parse_qs
-              parsed = urlparse(xray_config)
-              q = parse_qs(parsed.query)
-              outbound = {
-                  "protocol": "trojan",
-                  "settings": {
-                      "servers": [{
-                          "address": parsed.hostname,
-                          "port": parsed.port or 443,
-                          "password": parsed.username
-                      }]
-                  },
-                  "streamSettings": {
-                      "network": q.get("type", ["tcp"])[0],
-                      "security": "tls",
-                      "tlsSettings": {
-                          "serverName": q.get("sni", [parsed.hostname])[0],
-                          "allowInsecure": True
-                      }
-                  }
-              }
-
-          # ---------- 直接传入完整 JSON（可能 base64） ----------
-          else:
-              try:
-                  cfg_text = base64.b64decode(xray_config).decode("utf-8")
-              except:
-                  cfg_text = xray_config
-              full_config = json.loads(cfg_text)
-              if "inbounds" not in full_config or not full_config["inbounds"]:
-                  full_config["inbounds"] = [{
-                      "tag": "http-in",
-                      "port": 10809,
-                      "protocol": "http",
-                      "settings": {"allowTransparent": False},
-                      "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
-                  }]
-              if "outbounds" not in full_config or not full_config["outbounds"]:
-                  print("❌ 直接传入的配置缺少 outbounds，无法启动")
-                  exit(1)
-              with open("config.json", "w", encoding="utf-8") as f:
-                  json.dump(full_config, f, indent=2)
-              print("✅ 已写入完整 Xray JSON 配置")
-              exit(0)
-
-          if outbound is None:
-              print("❌ 无法识别节点链接格式，请检查 XRAY_CONFIG")
-              exit(1)
-
-          # ---------- 生成完整配置（补全 HTTP 入站） ----------
-          full_config = {
-              "log": {"loglevel": "warning"},
-              "inbounds": [{
-                  "tag": "http-in",
-                  "port": 10809,
-                  "protocol": "http",
-                  "settings": {"allowTransparent": False},
-                  "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
-              }],
-              "outbounds": [
-                  outbound,
-                  {"protocol": "freedom", "tag": "direct"}
-              ],
-              "routing": {"rules": []}
-          }
-
-          with open("config.json", "w", encoding="utf-8") as f:
-              json.dump(full_config, f, indent=2)
-          print(f"✅ 已生成 {outbound['protocol']} 配置")
-          PYEOF
-
-          echo "🚀 启动 Xray..."
-          nohup ./xray run -config config.json > xray.log 2>&1 &
-          sleep 5
-
-          echo "🌐 测试代理连通性..."
-          IP=$(curl -s --max-time 10 --fail -x http://127.0.0.1:10809 https://api.ipify.org 2>/dev/null || echo "failed")
-          if [ "$IP" = "failed" ]; then
-            echo "⚠️ Xray 代理测试失败，将使用直连"
-            echo "📄 最后 20 行日志："
-            cat xray.log | tail -n 20
-          else
-            echo "✅ 代理出口 IP: $(echo $IP | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g')"
-          fi
+          # 5. 测试连通性（IP 已脱敏）
+          curl -s -x http://127.0.0.1:10809 https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g'
+          echo "✅ Xray 代理已就绪"
+        # ======================================================
 
       - name: 🛠️ 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y \
             google-chrome-stable \
             xvfb \
             x11-utils \
             xdotool \
-            scrot \
-            unzip
+            scrot
 
       - name: 🐍 安装 Python 依赖
         run: |
@@ -303,10 +74,10 @@ jobs:
       - name: 🚀 运行脚本
         env:
           PYTHONIOENCODING: utf-8
-          # 如果代理测试成功，则后续步骤使用代理
-          ALL_PROXY: ${{ secrets.XRAY_CONFIG != '' && 'http://127.0.0.1:10809' || '' }}
-          HTTP_PROXY: ${{ secrets.XRAY_CONFIG != '' && 'http://127.0.0.1:10809' || '' }}
-          HTTPS_PROXY: ${{ secrets.XRAY_CONFIG != '' && 'http://127.0.0.1:10809' || '' }}
+          AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
+          # 原 GOST_PROXY 已移除，不再需要
+          TG_BOT: ${{ secrets.TG_BOT }}
+          CRON_JOB: ${{ secrets.US_CRON }}
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
 
@@ -317,17 +88,14 @@ jobs:
           name: debug-screenshots
           path: "*.png"
 
-      - name: 📄 上传 Xray 日志
+      # === 通知 Cloudflare Worker（保持不变）===
+      - name: 🔔 通知 
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xray-logs
-          path: "xray.log"
-
-      - name: 🔔 通知 Cloudflare Worker
-        if: always()
+        env:
+          WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+          WORKER_AUTH_TOKEN: ${{ secrets.CF_WORKER_AUTH_TOKEN }}
         run: |
-          curl -X POST "$CF_WORKER_URL" \
-            -H "Authorization: Bearer $CF_WORKER_AUTH_TOKEN" \
+          curl -X POST "$WORKER_URL" \
+            -H "Authorization: Bearer $WORKER_AUTH_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"status": "completed"}'
