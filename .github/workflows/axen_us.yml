@@ -2,18 +2,21 @@ name: Axen-US
 
 on:
   workflow_dispatch:
-  # 增加支持外部 API 触发通道
   repository_dispatch:
     types: [axen_auto_task]
 
 jobs:
   run_axen_us:
     runs-on: ubuntu-latest
+    # ✅ 在作业级别定义环境变量，方便 if 条件引用
+    env:
+      GOST_PROXY: ${{ secrets.US_PROXY }}
+
     steps:
       - name: 📥 下载私库脚本
         uses: actions/checkout@v4
         with:
-          repository: gunqio/zhiyong          # 修改此处
+          repository: gunqio/zhiyong
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
 
@@ -25,10 +28,9 @@ jobs:
         with:
           python-version: '3.10'
 
+      # ✅ 修正：if 条件改为判断作业级 env.GOST_PROXY 是否非空
       - name: 🛡️ 启动 GOST 代理转发
-        if: ${{ env.GOST_PROXY != '' }}
-        env:
-          GOST_PROXY: ${{ secrets.US_PROXY }}
+        if: env.GOST_PROXY != ''
         run: |
           VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
           echo "📦 GOST 版本: $VERSION"
@@ -37,8 +39,17 @@ jobs:
           chmod +x gost
           nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
           sleep 3
-          echo "✅ GOST 已启动，测试连通性..."
-          curl -s -x http://127.0.0.1:8080 https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g'
+          # ✅ 检查进程是否启动成功
+          if pgrep -x "gost" > /dev/null; then
+            echo "✅ GOST 进程运行中"
+          else
+            echo "❌ GOST 启动失败，日志如下："
+            cat gost.log
+            exit 1
+          fi
+          # 测试代理连通性
+          echo "测试代理连通性..."
+          curl -s -x http://127.0.0.1:8080 https://api.ipify.org || echo "⚠️ 代理连通失败"
 
       - name: 🛠️ 安装系统依赖
         run: |
@@ -59,9 +70,10 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
           AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
-          GOST_PROXY: ${{ secrets.US_PROXY }}
           TG_BOT: ${{ secrets.TG_BOT }}
           CRON_JOB: ${{ secrets.US_CRON }}
+          # ✅ 传递 GOST 代理地址给 Python 脚本（本地转发）
+          GOST_PROXY: http://127.0.0.1:8080
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
 
@@ -72,8 +84,7 @@ jobs:
           name: debug-screenshots
           path: "*.png"
 
-      # === 新增步骤：任务结束后通知 Cloudflare Worker 定时 70 分钟 ===
-      - name: 🔔 通知 
+      - name: 🔔 通知
         if: always()
         env:
           WORKER_URL: ${{ secrets.CF_WORKER_URL }}
