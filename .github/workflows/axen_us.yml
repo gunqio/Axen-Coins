@@ -193,8 +193,8 @@ jobs:
                   transport["type"] = net
               if data.get('path'):
                   transport["path"] = data['path']
+              # ========== 修复：sing-box ws transport 不支持 host 字段，只能用 headers ==========
               if data.get('host'):
-                  transport["host"] = data['host']
                   transport["headers"] = {"Host": data['host']}
               if transport:
                   out["transport"] = transport
