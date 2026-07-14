@@ -72,7 +72,7 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
           AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
-          PROXY_SERVER: http://127.0.0.1:1080
+          GOST_PROXY: http://127.0.0.1:1080   # ← 修复：与脚本中的 os.getenv('GOST_PROXY') 对应
           TG_BOT: ${{ secrets.TG_BOT }}
           CRON_JOB: ${{ secrets.US_CRON }}
         run: |
