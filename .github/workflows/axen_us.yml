@@ -25,9 +25,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ============================================================
-      # 1. 先装依赖（此时绝对不能走代理，否则 PyPI 被墙）
-      # ============================================================
+      # 1. 先装依赖（不走代理）
       - name: 🐍 安装 Python 依赖
         run: |
           pip install seleniumbase
@@ -38,36 +36,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable xvfb x11-utils xdotool scrot
 
-      # ============================================================
-      # 2. 启动 sing-box（用你的脚本）
-      # ============================================================
+      # 2. 启动 sing-box（脚本内部已验证代理可用）
       - name: ⚙ 设置代理 (sing-box)
         id: singbox
         env:
           NODE_LINK: ${{ secrets.US_PROXY }}
         run: |
           bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
-          sleep 5
-          pgrep -f sing-box || { echo "❌ sing-box 未启动"; exit 1; }
+          sleep 2
 
-      # ============================================================
-      # 3. 严格验证代理（失败就真失败，不掩盖）
-      # ============================================================
+      # 3. 验证代理（用 SOCKS5，跟脚本一致）
       - name: 🌐 验证代理
         id: proxytest
         if: ${{ steps.singbox.outcome == 'success' }}
         run: |
           for i in 1 2 3; do
-            IP=$(curl -s --max-time 10 -x http://127.0.0.1:1080 https://api.ip.sb/ip)
+            IP=$(curl -x socks5://127.0.0.1:1080 -s --max-time 10 https://api.ip.sb/ip)
             [ -n "$IP" ] && echo "✅ 代理正常，出口 IP: $IP" && exit 0
             sleep 3
           done
           echo "❌ 代理测试失败"
           exit 1
 
-      # ============================================================
       # 4. 代理失败 → 写回 Cron 1分钟后重试
-      # ============================================================
       - name: ⚠️ 代理失败写回 Cron 1分钟后重试
         if: ${{ failure() && (steps.singbox.outcome == 'failure' || steps.proxytest.outcome == 'failure') }}
         env:
@@ -115,9 +106,7 @@ jobs:
                   print(f"⚠️ TG 推送失败: {e}")
           EOF
 
-      # ============================================================
-      # 5. 运行脚本（仅本步骤注入代理，不影响前面 pip）
-      # ============================================================
+      # 5. 运行脚本（SOCKS5 代理）
       - name: 🚀 运行脚本
         if: ${{ steps.proxytest.outcome == 'success' }}
         env:
@@ -125,8 +114,8 @@ jobs:
           AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
           TG_BOT: ${{ secrets.TG_BOT }}
           CRON_JOB: ${{ secrets.US_CRON }}
-          HTTP_PROXY: http://127.0.0.1:1080
-          HTTPS_PROXY: http://127.0.0.1:1080
+          HTTP_PROXY: socks5://127.0.0.1:1080
+          HTTPS_PROXY: socks5://127.0.0.1:1080
           NO_PROXY: localhost,127.0.0.1
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
