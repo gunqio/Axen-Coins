@@ -27,7 +27,7 @@ jobs:
 
       - name: ⚙ 设置 Xray 代理（自适应 vless/vmess）
         env:
-          NODE_LINK: ${{ secrets.US_NODE_LINK }}  # 这里填 vless:// 或 vmess:// 链接
+          NODE_LINK: ${{ secrets.US_NODE_LINK }}
         run: |
           if [ -z "$NODE_LINK" ]; then
             echo "US_NODE_LINK 为空，跳过代理"
@@ -45,108 +45,106 @@ jobs:
 
           # 解析 US_NODE_LINK，生成 xray.json（支持 vmess:// 和 vless://）
           python3 << 'PYCODE'
-import os, json, base64, urllib.parse
+          import os, json, base64, urllib.parse
 
-node = os.environ["NODE_LINK"].strip()
+          node = os.environ["NODE_LINK"].strip()
 
-def base_config():
-    return {
-        "log": {"loglevel": "warning"},
-        "inbounds": [
-            {
-                "listen": "127.0.0.1",
-                "port": 8080,
-                "protocol": "http"
-            }
-        ],
-        "outbounds": []
-    }
+          def base_config():
+              return {
+                  "log": {"loglevel": "warning"},
+                  "inbounds": [
+                      {
+                          "listen": "127.0.0.1",
+                          "port": 8080,
+                          "protocol": "http"
+                      }
+                  ],
+                  "outbounds": []
+              }
 
-cfg = base_config()
+          cfg = base_config()
 
-if node.startswith("vmess://"):
-    raw = node[len("vmess://"):]
-    # vmess 分享通常是 base64 JSON
-    padded = raw + "=" * ((4 - len(raw) % 4) % 4)
-    data = json.loads(base64.b64decode(padded).decode())
-    address = data["add"]
-    port = int(data["port"])
-    uuid = data["id"]
-    net = data.get("net", "tcp")
-    security = "tls" if data.get("tls") == "tls" else "none"
+          if node.startswith("vmess://"):
+              raw = node[len("vmess://"):]
+              padded = raw + "=" * ((4 - len(raw) % 4) % 4)
+              data = json.loads(base64.b64decode(padded).decode())
+              address = data["add"]
+              port = int(data["port"])
+              uuid = data["id"]
+              net = data.get("net", "tcp")
+              security = "tls" if data.get("tls") == "tls" else "none"
 
-    outbound = {
-        "protocol": "vmess",
-        "settings": {
-            "vnext": [
-                {
-                    "address": address,
-                    "port": port,
-                    "users": [
-                        {
-                            "id": uuid,
-                            "security": data.get("security", "auto")
-                        }
-                    ]
-                }
-            ]
-        },
-        "streamSettings": {
-            "network": net,
-            "security": security
-        }
-    }
+              outbound = {
+                  "protocol": "vmess",
+                  "settings": {
+                      "vnext": [
+                          {
+                              "address": address,
+                              "port": port,
+                              "users": [
+                                  {
+                                      "id": uuid,
+                                      "security": data.get("security", "auto")
+                                  }
+                              ]
+                          }
+                      ]
+                  },
+                  "streamSettings": {
+                      "network": net,
+                      "security": security
+                  }
+              }
 
-    if net == "ws":
-        path = data.get("path", "/")
-        outbound["streamSettings"]["wsSettings"] = {"path": path}
+              if net == "ws":
+                  path = data.get("path", "/")
+                  outbound["streamSettings"]["wsSettings"] = {"path": path}
 
-    cfg["outbounds"].append(outbound)
+              cfg["outbounds"].append(outbound)
 
-elif node.startswith("vless://"):
-    # vless://uuid@host:port?type=ws&security=tls&path=/xxx&...
-    u = urllib.parse.urlsplit(node)
-    uuid = u.username
-    host = u.hostname
-    port = u.port
-    qs = urllib.parse.parse_qs(u.query)
-    net = qs.get("type", ["tcp"])[0]
-    security = qs.get("security", ["none"])[0]
-    path = qs.get("path", [""])[0]
+          elif node.startswith("vless://"):
+              u = urllib.parse.urlsplit(node)
+              uuid = u.username
+              host = u.hostname
+              port = u.port
+              qs = urllib.parse.parse_qs(u.query)
+              net = qs.get("type", ["tcp"])[0]
+              security = qs.get("security", ["none"])[0]
+              path = qs.get("path", [""])[0]
 
-    outbound = {
-        "protocol": "vless",
-        "settings": {
-            "vnext": [
-                {
-                    "address": host,
-                    "port": port,
-                    "users": [
-                        {
-                            "id": uuid,
-                            "encryption": "none"
-                        }
-                    ]
-                }
-            ]
-        },
-        "streamSettings": {
-            "network": net,
-            "security": security
-        }
-    }
+              outbound = {
+                  "protocol": "vless",
+                  "settings": {
+                      "vnext": [
+                          {
+                              "address": host,
+                              "port": port,
+                              "users": [
+                                  {
+                                      "id": uuid,
+                                      "encryption": "none"
+                                  }
+                              ]
+                          }
+                      ]
+                  },
+                  "streamSettings": {
+                      "network": net,
+                      "security": security
+                  }
+              }
 
-    if net == "ws" and path:
-        outbound["streamSettings"]["wsSettings"] = {"path": path}
+              if net == "ws" and path:
+                  outbound["streamSettings"]["wsSettings"] = {"path": path}
 
-    cfg["outbounds"].append(outbound)
+              cfg["outbounds"].append(outbound)
 
-else:
-    raise SystemExit("Unsupported node link protocol: " + node)
+          else:
+              raise SystemExit("Unsupported node link protocol: " + node)
 
-with open("xray.json", "w") as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PYCODE
+          with open("xray.json", "w") as f:
+              json.dump(cfg, f, ensure_ascii=False, indent=2)
+          PYCODE
 
           # 启动 Xray，本地 HTTP 代理 :8080
           ./xray run -c xray.json > /tmp/xray.log 2>&1 &
