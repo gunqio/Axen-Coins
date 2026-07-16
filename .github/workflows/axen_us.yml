@@ -25,7 +25,9 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. 先装依赖（不走代理）
+      # ============================================================
+      # 1. 先装依赖（此时绝对不能走代理，否则 PyPI 被墙）
+      # ============================================================
       - name: 🐍 安装 Python 依赖
         run: |
           pip install seleniumbase
@@ -36,7 +38,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable xvfb x11-utils xdotool scrot
 
-      # 2. 启动 sing-box（脚本内部已验证代理可用）
+      # ============================================================
+      # 2. 启动 sing-box（setup_proxy.sh 同时开 SOCKS5:1080 和 HTTP:1081）
+      # ============================================================
       - name: ⚙ 设置代理 (sing-box)
         id: singbox
         env:
@@ -45,20 +49,24 @@ jobs:
           bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
           sleep 2
 
-      # 3. 验证代理（用 SOCKS5，跟脚本一致）
+      # ============================================================
+      # 3. 验证代理（用 HTTP:1081，curl 和 seleniumbase 都兼容）
+      # ============================================================
       - name: 🌐 验证代理
         id: proxytest
         if: ${{ steps.singbox.outcome == 'success' }}
         run: |
           for i in 1 2 3; do
-            IP=$(curl -x socks5://127.0.0.1:1080 -s --max-time 10 https://api.ip.sb/ip)
+            IP=$(curl -x http://127.0.0.1:1081 -s --max-time 10 https://api.ip.sb/ip)
             [ -n "$IP" ] && echo "✅ 代理正常，出口 IP: $IP" && exit 0
             sleep 3
           done
           echo "❌ 代理测试失败"
           exit 1
 
+      # ============================================================
       # 4. 代理失败 → 写回 Cron 1分钟后重试
+      # ============================================================
       - name: ⚠️ 代理失败写回 Cron 1分钟后重试
         if: ${{ failure() && (steps.singbox.outcome == 'failure' || steps.proxytest.outcome == 'failure') }}
         env:
@@ -106,7 +114,9 @@ jobs:
                   print(f"⚠️ TG 推送失败: {e}")
           EOF
 
-      # 5. 运行脚本（SOCKS5 代理）
+      # ============================================================
+      # 5. 运行脚本（仅本步骤注入 HTTP 代理，不影响前面 pip）
+      # ============================================================
       - name: 🚀 运行脚本
         if: ${{ steps.proxytest.outcome == 'success' }}
         env:
@@ -114,12 +124,15 @@ jobs:
           AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
           TG_BOT: ${{ secrets.TG_BOT }}
           CRON_JOB: ${{ secrets.US_CRON }}
-          HTTP_PROXY: socks5://127.0.0.1:1080
-          HTTPS_PROXY: socks5://127.0.0.1:1080
+          HTTP_PROXY: http://127.0.0.1:1081
+          HTTPS_PROXY: http://127.0.0.1:1081
           NO_PROXY: localhost,127.0.0.1
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
 
+      # ============================================================
+      # 6. 上传截图（无论成功失败）
+      # ============================================================
       - name: 📸 上传截图
         if: always()
         uses: actions/upload-artifact@v4
@@ -127,6 +140,9 @@ jobs:
           name: debug-screenshots
           path: "*.png"
 
+      # ============================================================
+      # 7. 清理旧的工作流运行记录
+      # ============================================================
       - name: 🧹 清理旧的工作流运行记录
         if: always()
         env:
