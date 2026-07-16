@@ -1,96 +1,135 @@
 name: Axen-US
 
 on:
-  workflow_dispatch:
-  repository_dispatch:
-    types: [axen_auto_task]
+workflow_dispatch:
+schedule:
+- cron: '0 2 * * *'
 
 jobs:
-  run_axen_us:
-    runs-on: ubuntu-latest
-    # ✅ 在作业级别定义环境变量，方便 if 条件引用
-    env:
-      GOST_PROXY: ${{ secrets.US_PROXY }}
+Renew-bot:
+runs-on: ubuntu-latest
+permissions:
+actions: write
+contents: read
 
-    steps:
-      - name: 📥 下载私库脚本
-        uses: actions/checkout@v4
-        with:
-          repository: gunqio/zhiyong
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: private
+steps:
+- name: 📥 下载私库脚本
+uses: actions/checkout@v4
+with:
+repository: gunqio/zhiyong
+token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+path: private
 
-      - name: 📂 移动脚本到工作目录
-        run: mv private/axen_coins.py axen_coins.py
+- name: 📂 移动脚本到工作目录
+run: mv private/axen_coins.py axen_coins.py
 
-      - name: 🐍 设置 Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+- name: 🐍 设置 Python
+uses: actions/setup-python@v5
+with:
+python-version: '3.10'
 
-      # ✅ 修正：if 条件改为判断作业级 env.GOST_PROXY 是否非空
-      - name: 🛡️ 启动 GOST 代理转发
-        if: env.GOST_PROXY != ''
-        run: |
-          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          echo "📦 GOST 版本: $VERSION"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-          chmod +x gost
-          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
-          sleep 3
-          # ✅ 检查进程是否启动成功
-          if pgrep -x "gost" > /dev/null; then
-            echo "✅ GOST 进程运行中"
-          else
-            echo "❌ GOST 启动失败，日志如下："
-            cat gost.log
-            exit 1
-          fi
-          # 测试代理连通性
-          echo "测试代理连通性..."
-          curl -s -x http://127.0.0.1:8080 https://api.ipify.org || echo "⚠️ 代理连通失败"
+- name: ⚙ 设置 GOST 代理转发
+env:
+NODE_LINK: ${{ secrets.US_PROXY }}
+run: |
+if [ -z "$NODE_LINK" ]; then
+echo "US_PROXY 为空，跳过代理"
+echo "GOST_PROXY=" >> $GITHUB_ENV
+exit 0
+fi
 
-      - name: 🛠️ 安装系统依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            google-chrome-stable \
-            xvfb \
-            x11-utils \
-            xdotool \
-            scrot
+sudo apt-get update -qq
+sudo apt-get install -y -qq wget
 
-      - name: 🐍 安装 Python 依赖
-        run: |
-          pip install seleniumbase
-          seleniumbase install chromedriver
+VERSION="2.11.5"
+wget -q --timeout=30 "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost-linux-amd64-${VERSION}.gz"
+gunzip -f "gost-linux-amd64-${VERSION}.gz"
+chmod +x "gost-linux-amd64-${VERSION}"
+mv "gost-linux-amd64-${VERSION}" gost
 
-      - name: 🚀 运行脚本
-        env:
-          PYTHONIOENCODING: utf-8
-          AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
-          TG_BOT: ${{ secrets.TG_BOT }}
-          CRON_JOB: ${{ secrets.US_CRON }}
-          # ✅ 传递 GOST 代理地址给 Python 脚本（本地转发）
-          GOST_PROXY: http://127.0.0.1:8080
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
+./gost -L=:1080 -F "$NODE_LINK" > /tmp/gost.log 2>&1 &
+sleep 3
 
-      - name: 📸 上传截图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots
-          path: "*.png"
+echo "GOST_PROXY=http://127.0.0.1:1080" >> $GITHUB_ENV
+echo "ALL_PROXY=http://127.0.0.1:1080" >> $GITHUB_ENV
+echo "http_proxy=http://127.0.0.1:1080" >> $GITHUB_ENV
+echo "https_proxy=http://127.0.0.1:1080" >> $GITHUB_ENV
+echo "no_proxy=localhost,127.0.0.1" >> $GITHUB_ENV
 
-      - name: 🔔 通知
-        if: always()
-        env:
-          WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-          WORKER_AUTH_TOKEN: ${{ secrets.CF_WORKER_AUTH_TOKEN }}
-        run: |
-          curl -X POST "$WORKER_URL" \
-            -H "Authorization: Bearer $WORKER_AUTH_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"status": "completed"}'
+echo "✅ GOST 代理已启动: http://127.0.0.1:1080"
+
+- name: 🛠️ 安装 Chrome for Testing 和系统依赖
+run: |
+sudo apt-get update -qq
+sudo apt-get install -y -qq \
+xvfb \
+wget \
+unzip \
+libnss3 \
+libfontconfig1 \
+libgbm1
+
+# 下载 Chrome for Testing（专为自动化测试设计，无依赖问题）
+CHROME_VERSION="150.0.7871.115" # 与 ChromeDriver 版本一致
+wget -q --timeout=60 "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -O chrome.zip || \
+wget -q --timeout=60 "https://registry.npmmirror.com/-/binary/chrome-for-testing/${CHROME_VERSION}/linux64/chrome-linux64.zip" -O chrome.zip
+
+unzip -q chrome.zip
+sudo mv chrome-linux64 /opt/chrome
+sudo ln -sf /opt/chrome/chrome /usr/local/bin/google-chrome
+
+google-chrome --version
+
+- name: 🐍 安装 Python 依赖
+run: |
+pip install --no-cache-dir seleniumbase requests
+
+- name: 🔧 安装 ChromeDriver
+run: |
+CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+' || echo "150.0.7871.115")
+echo "Chrome 版本: $CHROME_VERSION"
+
+# 直接下载对应版本的 ChromeDriver
+wget -q --timeout=60 "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -O chromedriver.zip || \
+wget -q --timeout=60 "https://registry.npmmirror.com/-/binary/chromedriver/${CHROME_VERSION}/chromedriver_linux64.zip" -O chromedriver.zip
+
+unzip -q chromedriver.zip
+sudo mv chromedriver-linux64/chromedriver /usr/local/bin/chromedriver || sudo mv chromedriver /usr/local/bin/chromedriver
+sudo chmod +x /usr/local/bin/chromedriver
+chromedriver --version
+
+- name: 🚀 运行脚本
+env:
+PYTHONIOENCODING: utf-8
+AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
+GOST_PROXY: ${{ env.GOST_PROXY }}
+TG_BOT: ${{ secrets.TG_BOT }}
+run: |
+which chromedriver
+chromedriver --version
+xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
+
+- name: 📸 上传截图和 HTML
+if: always()
+uses: actions/upload-artifact@v4
+with:
+name: debug-files
+path: |
+*.png
+*.html
+retention-days: 3
+
+- name: 🧹 清理旧的工作流运行记录
+if: always()
+env:
+GH_TOKEN: ${{ github.token }}
+run: |
+runs=$(gh run list --repo ${{ github.repository }} --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+count=0
+for run_id in $runs; do
+count=$((count + 1))
+if [ $count -gt 3 ]; then
+echo "删除运行记录: $run_id"
+gh run delete $run_id --repo ${{ github.repository }} || true
+fi
+done
