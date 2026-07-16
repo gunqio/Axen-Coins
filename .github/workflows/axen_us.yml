@@ -26,76 +26,102 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
-      # 安装 sing-box（修正 curl 重定向，并安装到系统 PATH）
+      # 1. 先安装 Python 依赖（此时不走代理，避免 PyPI 被墙）
+      # ============================================================
+      - name: 🐍 安装 Python 依赖
+        run: |
+          pip install seleniumbase
+          seleniumbase install chromedriver
+
+      # ============================================================
+      # 2. 安装系统依赖（Chrome, Xvfb 等）
+      # ============================================================
+      - name: 🛠️ 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            google-chrome-stable \
+            xvfb \
+            x11-utils \
+            xdotool \
+            scrot \
+            jq
+
+      # ============================================================
+      # 3. 安装 sing-box（直接从官方 Release 下载，不依赖第三方脚本）
       # ============================================================
       - name: ⚙ 安装 sing-box
         id: singbox
         env:
           NODE_LINK: ${{ secrets.US_PROXY }}
         run: |
-          # 下载并执行修正后的脚本
-          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh | sed 's/curl -s "/curl -sL "/g')
-          # 将二进制文件移动到系统路径，以便后续直接调用
-          sudo mv ./sing-box /usr/local/bin/
-          # 验证安装
-          sing-box version || { echo "sing-box 安装失败"; exit 1; }
+          SINGBOX_VER=$(curl -sL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+          ARCH="amd64"
+          DEB_URL="https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VER}/sing-box_${SINGBOX_VER#v}_linux_${ARCH}.deb"
+          echo "Downloading $DEB_URL"
+          wget -q "$DEB_URL" -O /tmp/sing-box.deb
+          sudo dpkg -i /tmp/sing-box.deb || sudo apt-get install -f -y
+          sing-box version
 
       # ============================================================
-      # 从 vmess 链接生成 sing-box 配置文件
+      # 4. 生成 sing-box 配置文件
       # ============================================================
       - name: 🔧 生成 vmess 配置
+        id: genconfig
         if: ${{ steps.singbox.outcome == 'success' }}
         env:
           NODE_LINK: ${{ secrets.US_PROXY }}
         run: |
           python3 - <<'EOF'
-          import os, base64, json, urllib.parse
+          import os, base64, json, urllib.parse, sys
+
           vmess = os.environ.get('NODE_LINK', '').strip()
           if not vmess.startswith('vmess://'):
               print('❌ NODE_LINK 不是 vmess 链接')
-              exit(1)
-          # 去掉前缀
+              sys.exit(1)
+
           vmess = vmess[8:]
-          # 尝试 base64 解码（可能包含 URL 编码）
           try:
-              # 先进行 URL 解码，以防有 % 编码
               vmess = urllib.parse.unquote(vmess)
               config = json.loads(base64.b64decode(vmess).decode('utf-8'))
           except Exception as e:
               print(f'❌ 解码 vmess 失败: {e}')
-              exit(1)
+              sys.exit(1)
 
-          # 构建 sing-box outbound
+          # sing-box 1.x 标准 vmess outbound
           outbound = {
               "type": "vmess",
               "tag": "proxy",
               "server": config['add'],
               "server_port": int(config['port']),
               "uuid": config['id'],
-              "alter_id": int(config.get('aid', 0)),
               "security": config.get('scy', 'auto'),
+              "alter_id": int(config.get('aid', 0)),
           }
 
-          # 传输层配置
+          # 传输层
           net = config.get('net', 'tcp')
           if net == 'ws':
               outbound['transport'] = {
                   "type": "ws",
                   "path": config.get('path', '/'),
-                  "headers": {"Host": config.get('host', '')}
+                  "headers": {"Host": config.get('host', config['add'])}
               }
-          elif net == 'tcp':
-              outbound['transport'] = {"type": "tcp"}
+          elif net == 'grpc':
+              outbound['transport'] = {
+                  "type": "grpc",
+                  "service_name": config.get('path', '')
+              }
 
-          # TLS 配置
-          if config.get('tls') == 'tls':
+          # TLS
+          if config.get('tls') == 'tls' or config.get('security') == 'tls':
               outbound['tls'] = {
                   "enabled": True,
-                  "server_name": config.get('sni', config.get('host', ''))
+                  "server_name": config.get('sni', config.get('host', config['add']))
               }
 
-          # 完整 sing-box 配置（inbound mixed，outbound 走代理）
           singbox_config = {
+              "log": {"level": "info"},
               "inbounds": [{
                   "type": "mixed",
                   "listen": "127.0.0.1",
@@ -104,6 +130,7 @@ jobs:
               "outbounds": [outbound, {"type": "direct", "tag": "direct"}],
               "route": {
                   "final": "proxy",
+                  "auto_detect_interface": True,
                   "rules": [
                       {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"], "outbound": "direct"}
                   ]
@@ -115,40 +142,53 @@ jobs:
           print('✅ sing-box 配置文件生成成功')
           EOF
 
-          # 移动配置文件到系统目录
           sudo mkdir -p /etc/sing-box
           sudo mv /tmp/config.json /etc/sing-box/config.json
+          cat /etc/sing-box/config.json
 
       # ============================================================
-      # 启动 sing-box 代理服务
+      # 5. 启动 sing-box 并严格验证代理可用性
       # ============================================================
-      - name: 🚀 启动代理服务
-        if: ${{ steps.singbox.outcome == 'success' }}
+      - name: 🚀 启动并验证代理
+        id: proxystart
+        if: ${{ steps.genconfig.outcome == 'success' }}
         run: |
-          # 后台启动
-          sudo nohup sing-box run -c /etc/sing-box/config.json > sing-box.log 2>&1 &
-          # 等待启动
+          # 清理可能残留的进程
+          pkill -f sing-box || true
+          sleep 1
+
+          # 后台启动并保留日志
+          sudo nohup sing-box run -c /etc/sing-box/config.json > /tmp/sing-box.log 2>&1 &
           sleep 5
-          # 检查进程
-          ps aux | grep sing-box | grep -v grep
-          # 设置环境变量供后续步骤使用
-          echo "HTTP_PROXY=http://127.0.0.1:1080" >> $GITHUB_ENV
-          echo "HTTPS_PROXY=http://127.0.0.1:1080" >> $GITHUB_ENV
-          echo "NO_PROXY=localhost,127.0.0.1" >> $GITHUB_ENV
+
+          # 检查进程是否存在
+          if ! pgrep -f "sing-box run" > /dev/null; then
+            echo "❌ sing-box 进程未启动"
+            cat /tmp/sing-box.log
+            exit 1
+          fi
+
+          # 严格测试代理：必须成功，否则本步骤失败
+          echo "🌐 测试代理出口..."
+          for i in 1 2 3; do
+            IP=$(curl -s --max-time 10 -x http://127.0.0.1:1080 https://api.ip.sb/ip)
+            if [ -n "$IP" ]; then
+              echo "✅ 代理正常，出口 IP: $IP"
+              exit 0
+            fi
+            echo "⏳ 第 $i 次重试..."
+            sleep 3
+          done
+
+          echo "❌ 代理测试失败，sing-box 日志:"
+          cat /tmp/sing-box.log
+          exit 1
 
       # ============================================================
-      # 验证代理出口（可选）
-      # ============================================================
-      - name: 🌐 验证代理出口
-        if: ${{ steps.singbox.outcome == 'success' }}
-        run: |
-          curl -x http://127.0.0.1:1080 https://api.ip.sb/ip || echo "代理测试失败"
-
-      # ============================================================
-      # 代理失败 → 写回 Cron 1 分钟后重试
+      # 6. 代理失败 → 写回 Cron 1 分钟后重试
       # ============================================================
       - name: ⚠️ 代理失败写回 Cron 1分钟后重试
-        if: ${{ failure() && steps.singbox.outcome == 'failure' }}
+        if: ${{ failure() && (steps.singbox.outcome == 'failure' || steps.proxystart.outcome == 'failure') }}
         env:
           CRON_JOB: ${{ secrets.US_CRON }}
           TG_BOT: ${{ secrets.TG_BOT }}
@@ -173,60 +213,45 @@ jobs:
                   headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                   method="PATCH"
               )
-              urllib.request.urlopen(req, timeout=15)
-              print(f"🔁 代理失败，已写回Cron：{next_run.hour:02d}:{next_run.minute:02d} 重试")
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print(f"🔁 已写回 Cron：{next_run.hour:02d}:{next_run.minute:02d} 重试")
+              except Exception as e:
+                  print(f"⚠️ 写回 Cron 失败: {e}")
 
           tg_bot = os.environ.get("TG_BOT", "")
           if tg_bot and "," in tg_bot:
               chat_id, token = [x.strip() for x in tg_bot.split(",", 1)]
               msg = "⚠️ Axen US 代理启动失败，已安排1分钟后重试"
-              urllib.request.urlopen(
-                  f"https://api.telegram.org/bot{token}/sendMessage",
-                  data=urllib.parse.urlencode({"chat_id": chat_id, "text": msg}).encode(),
-                  timeout=10
-              )
-              print("📨 TG 推送成功")
+              try:
+                  urllib.request.urlopen(
+                      f"https://api.telegram.org/bot{token}/sendMessage",
+                      data=urllib.parse.urlencode({"chat_id": chat_id, "text": msg}).encode(),
+                      timeout=10
+                  )
+                  print("📨 TG 推送成功")
+              except Exception as e:
+                  print(f"⚠️ TG 推送失败: {e}")
           EOF
 
       # ============================================================
-      # 安装系统依赖（Chrome, Xvfb 等）
-      # ============================================================
-      - name: 🛠️ 安装系统依赖
-        if: ${{ steps.singbox.outcome == 'success' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            google-chrome-stable \
-            xvfb \
-            x11-utils \
-            xdotool \
-            scrot
-
-      # ============================================================
-      # 安装 Python 依赖
-      # ============================================================
-      - name: 🐍 安装 Python 依赖
-        if: ${{ steps.singbox.outcome == 'success' }}
-        run: |
-          pip install seleniumbase
-          seleniumbase install chromedriver
-
-      # ============================================================
-      # 运行 Axen 脚本（代理已通过环境变量生效）
+      # 7. 运行 Axen 脚本（仅在代理验证通过后，且只对该步骤注入代理变量）
       # ============================================================
       - name: 🚀 运行脚本
-        if: ${{ steps.singbox.outcome == 'success' }}
+        if: ${{ steps.proxystart.outcome == 'success' }}
         env:
           PYTHONIOENCODING: utf-8
           AXEN_ACCOUNT: ${{ secrets.US_ACCOUNT }}
           TG_BOT: ${{ secrets.TG_BOT }}
           CRON_JOB: ${{ secrets.US_CRON }}
-          # HTTP_PROXY 和 HTTPS_PROXY 已在上一步通过 $GITHUB_ENV 设置
+          HTTP_PROXY: http://127.0.0.1:1080
+          HTTPS_PROXY: http://127.0.0.1:1080
+          NO_PROXY: localhost,127.0.0.1
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
 
       # ============================================================
-      # 上传截图（无论成功失败都执行）
+      # 8. 上传截图（无论成功失败）
       # ============================================================
       - name: 📸 上传截图
         if: always()
@@ -236,7 +261,7 @@ jobs:
           path: "*.png"
 
       # ============================================================
-      # 清理旧工作流运行记录（保留最近一次）
+      # 9. 清理旧工作流运行记录
       # ============================================================
       - name: 🧹 清理旧的工作流运行记录
         if: always()
