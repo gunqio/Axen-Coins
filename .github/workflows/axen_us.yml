@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: '3.10'
           
-      - name: ⚙ 启动 GOST 代理（仅脚本使用）
+      - name: ⚙ 启动 GOST 代理（带健康检查）
         env:
           NODE_LINK: ${{ secrets.US_PROXY }}
         run: |
@@ -36,7 +36,7 @@ jobs:
           fi
 
           sudo apt-get update -qq
-          sudo apt-get install -y -qq wget
+          sudo apt-get install -y -qq wget curl
 
           VERSION="2.11.5"
           wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost-linux-amd64-${VERSION}.gz"
@@ -45,16 +45,23 @@ jobs:
           mv "gost-linux-amd64-${VERSION}" gost
 
           ./gost -L=:1080 -F "$NODE_LINK" > /tmp/gost.log 2>&1 &
-          sleep 3
+          sleep 5
 
-          # 验证端口是否监听
-          if ss -tlnp 2>/dev/null | grep -q ':1080'; then
-            echo "✅ GOST 代理已启动: http://127.0.0.1:1080"
+          # 关键：通过代理访问目标站，验证隧道是否可用
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 --proxy http://127.0.0.1:1080 https://app.axenthost.com/login || echo "000")
+          echo "代理测试 HTTP 状态码: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "403" ]; then
             echo "http://127.0.0.1:1080" > /tmp/gost_proxy_url
+            echo "✅ GOST 代理可用"
           else
-            echo "⚠️ GOST 端口未监听，可能启动失败"
+            echo "⚠️ GOST 代理测试失败，HTTP_CODE=$HTTP_CODE"
+            echo "--- GOST 日志 ---"
             cat /tmp/gost.log || true
+            echo "--- 结束 ---"
             touch /tmp/skip_gost
+            pkill gost || true
+            echo "ℹ️ 将使用直连模式"
           fi
           
       - name: 🛠️ 安装系统依赖
@@ -68,7 +75,6 @@ jobs:
             scrot
             
       - name: 🐍 安装 Python 依赖
-        # 关键：取消全局代理，让 pip 直连 PyPI
         run: |
           unset http_proxy https_proxy ALL_PROXY HTTP_PROXY HTTPS_PROXY
           pip install seleniumbase
@@ -81,12 +87,11 @@ jobs:
           TG_BOT: ${{ secrets.TG_BOT }}
           CRON_JOB: ${{ secrets.US_CRON }}
         run: |
-          # 仅当 GOST 成功启动时才注入代理变量，避免污染其他工具
-          if [ ! -f /tmp/skip_gost ] && [ -f /tmp/gost_proxy_url ]; then
+          if [ -f /tmp/gost_proxy_url ] && [ ! -f /tmp/skip_gost ]; then
             export GOST_PROXY=$(cat /tmp/gost_proxy_url)
             echo "🌐 脚本使用代理: $GOST_PROXY"
           else
-            echo "🌐 脚本直连模式"
+            echo "🌐 脚本直连模式（代理不可用或已跳过）"
           fi
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python axen_coins.py
           
@@ -102,7 +107,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 关键：取消代理，让 gh CLI 直连 GitHub API
           unset http_proxy https_proxy ALL_PROXY HTTP_PROXY HTTPS_PROXY
           runs=$(gh run list --repo ${{ github.repository }} --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
           count=0
