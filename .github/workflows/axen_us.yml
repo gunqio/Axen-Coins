@@ -25,42 +25,69 @@ jobs:
         with:
           python-version: '3.10'
           
-      - name: ⚙ 启动 GOST 代理（带健康检查）
+      - name: ⚙ 启动 Xray-core 代理（带健康检查）
         env:
-          NODE_LINK: ${{ secrets.US_PROXY }}
+          XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}
         run: |
-          if [ -z "$NODE_LINK" ]; then
-            echo "ℹ️ US_PROXY 为空，跳过代理启动"
-            touch /tmp/skip_gost
+          if [ -z "$XRAY_CONFIG" ]; then
+            echo "ℹ️ XRAY_CONFIG 为空，跳过代理启动"
+            touch /tmp/skip_xray
             exit 0
           fi
 
           sudo apt-get update -qq
           sudo apt-get install -y -qq wget curl
 
-          VERSION="2.11.5"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost-linux-amd64-${VERSION}.gz"
-          gunzip -f "gost-linux-amd64-${VERSION}.gz"
-          chmod +x "gost-linux-amd64-${VERSION}"
-          mv "gost-linux-amd64-${VERSION}" gost
+          # 下载 Xray-core 最新版
+          VERSION="24.11.30"
+          wget -q "https://github.com/XTLS/Xray-core/releases/download/v${VERSION}/Xray-linux-64.zip"
+          unzip -q -o "Xray-linux-64.zip" -d xray_dir
+          chmod +x xray_dir/xray
 
-          ./gost -L=:1080 -F "$NODE_LINK" > /tmp/gost.log 2>&1 &
+          # 写入配置文件
+          echo "$XRAY_CONFIG" > /tmp/xray_config.json
+
+          # 启动 Xray
+          ./xray_dir/xray -c /tmp/xray_config.json > /tmp/xray.log 2>&1 &
           sleep 5
 
-          # 关键：通过代理访问目标站，验证隧道是否可用
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 --proxy http://127.0.0.1:1080 https://app.axenthost.com/login || echo "000")
+          # 验证端口是否监听（默认 socks5 1080 或 http 1081，根据配置调整）
+          if ss -tlnp 2>/dev/null | grep -q ':1080'; then
+            echo "✅ Xray 代理已启动: socks5://127.0.0.1:1080"
+            echo "socks5://127.0.0.1:1080" > /tmp/xray_proxy_url
+          elif ss -tlnp 2>/dev/null | grep -q ':1081'; then
+            echo "✅ Xray 代理已启动: http://127.0.0.1:1081"
+            echo "http://127.0.0.1:1081" > /tmp/xray_proxy_url
+          else
+            echo "⚠️ Xray 端口未监听，可能启动失败"
+            echo "--- Xray 日志 ---"
+            cat /tmp/xray.log || true
+            echo "--- 结束 ---"
+            touch /tmp/skip_xray
+            pkill xray || true
+            echo "ℹ️ 将使用直连模式"
+            exit 0
+          fi
+
+          # 健康检查：通过代理访问目标站
+          # 注意：Xray 默认是 socks5，curl 需要 --socks5 或配置 http inbound
+          PROXY_URL=$(cat /tmp/xray_proxy_url)
+          if [[ "$PROXY_URL" == socks5* ]]; then
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 --socks5-hostname 127.0.0.1:1080 https://app.axenthost.com/login || echo "000")
+          else
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 --proxy "$PROXY_URL" https://app.axenthost.com/login || echo "000")
+          fi
           echo "代理测试 HTTP 状态码: $HTTP_CODE"
 
           if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "403" ]; then
-            echo "http://127.0.0.1:1080" > /tmp/gost_proxy_url
-            echo "✅ GOST 代理可用"
+            echo "✅ Xray 代理可用"
           else
-            echo "⚠️ GOST 代理测试失败，HTTP_CODE=$HTTP_CODE"
-            echo "--- GOST 日志 ---"
-            cat /tmp/gost.log || true
+            echo "⚠️ Xray 代理测试失败，HTTP_CODE=$HTTP_CODE"
+            echo "--- Xray 日志 ---"
+            cat /tmp/xray.log || true
             echo "--- 结束 ---"
-            touch /tmp/skip_gost
-            pkill gost || true
+            touch /tmp/skip_xray
+            pkill xray || true
             echo "ℹ️ 将使用直连模式"
           fi
           
@@ -87,8 +114,8 @@ jobs:
           TG_BOT: ${{ secrets.TG_BOT }}
           CRON_JOB: ${{ secrets.US_CRON }}
         run: |
-          if [ -f /tmp/gost_proxy_url ] && [ ! -f /tmp/skip_gost ]; then
-            export GOST_PROXY=$(cat /tmp/gost_proxy_url)
+          if [ -f /tmp/xray_proxy_url ] && [ ! -f /tmp/skip_xray ]; then
+            export GOST_PROXY=$(cat /tmp/xray_proxy_url)
             echo "🌐 脚本使用代理: $GOST_PROXY"
           else
             echo "🌐 脚本直连模式（代理不可用或已跳过）"
